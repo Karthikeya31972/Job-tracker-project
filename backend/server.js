@@ -9,15 +9,19 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-
-const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017';
+let rawMongoUri = process.env.MONGO_URI || 'mongodb://localhost:27017';
+if (rawMongoUri.startsWith('MONGO_URI=')) {
+  rawMongoUri = rawMongoUri.substring('MONGO_URI='.length).trim();
+}
+const MONGO_URI = rawMongoUri;
 const PORT = parseInt(process.env.PORT, 10) || 5000;
 const DB_NAME = process.env.DB_NAME || "jobtracker";
-//const client = new MongoClient(MONGO_URI);
-const client = new MongoClient(MONGO_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
+const client = new MongoClient(MONGO_URI);
+
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', time: new Date() });
 });
+
 let usersCol;
 let jobsCol;
 let resumesCol;
@@ -354,9 +358,17 @@ app.post('/jobs/:jobId/notes', async (req, res) => {
 });
 
 app.post('/reset-db', async (req, res) => {
-  await usersCol.deleteMany({});
-  await jobsCol.deleteMany({});
-  return res.json({ message: 'Database reset successfully' });
+  try {
+    await usersCol.deleteMany({});
+    await jobsCol.deleteMany({});
+    await resumesCol.deleteMany({});
+    await jobPostingsCol.deleteMany({});
+    await jobApplicationsCol.deleteMany({});
+    await jobSeekerResumesCol.deleteMany({});
+    return res.json({ message: 'Database reset successfully' });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
 });
 
 app.get('/admin/jobs', async (req, res) => {
@@ -880,13 +892,25 @@ app.get('/resumes/:userId', async (req, res) => {
   }
 });
 
+let activeClient = client;
+
 async function start() {
   try {
-    //await client.connect();
-    await client.connect();
-    console.log("MongoDB Connected ✅");
-   // const db = client.db('jobtracker');
-   const db = client.db(DB_NAME);
+    try {
+      await activeClient.connect();
+      console.log("MongoDB Connected ✅");
+    } catch (primaryErr) {
+      if (MONGO_URI !== 'mongodb://127.0.0.1:27017' && MONGO_URI !== 'mongodb://localhost:27017') {
+        console.warn(`⚠️ Primary MongoDB connection failed (${primaryErr.message}). Attempting fallback to local MongoDB (mongodb://127.0.0.1:27017)...`);
+        activeClient = new MongoClient('mongodb://127.0.0.1:27017');
+        await activeClient.connect();
+        console.log("Connected to local MongoDB fallback ✅");
+      } else {
+        throw primaryErr;
+      }
+    }
+
+    const db = activeClient.db(DB_NAME);
     usersCol = db.collection('users');
     jobsCol = db.collection('jobs');
     resumesCol = db.collection('resumes');
@@ -894,13 +918,13 @@ async function start() {
     jobApplicationsCol = db.collection('job_applications');
     jobSeekerResumesCol = db.collection('job_seeker_resumes');
 
-    await usersCol.createIndex({ username: 1 }, { unique: true });
-    await jobsCol.createIndex({ user_id: 1 });
-    await resumesCol.createIndex({ user_id: 1 });
-    await jobPostingsCol.createIndex({ recruiter_id: 1 });
-    await jobApplicationsCol.createIndex({ user_id: 1 });
-    await jobApplicationsCol.createIndex({ job_id: 1 });
-    await jobSeekerResumesCol.createIndex({ user_id: 1 });
+    await usersCol.createIndex({ username: 1 }, { unique: true }).catch(e => console.warn('User index:', e.message));
+    await jobsCol.createIndex({ user_id: 1 }).catch(e => console.warn('Jobs index:', e.message));
+    await resumesCol.createIndex({ user_id: 1 }).catch(e => console.warn('Resumes index:', e.message));
+    await jobPostingsCol.createIndex({ recruiter_id: 1 }).catch(e => console.warn('Postings index:', e.message));
+    await jobApplicationsCol.createIndex({ user_id: 1 }).catch(e => console.warn('Applications index:', e.message));
+    await jobApplicationsCol.createIndex({ job_id: 1 }).catch(e => console.warn('App job index:', e.message));
+    await jobSeekerResumesCol.createIndex({ user_id: 1 }).catch(e => console.warn('Seeker resume index:', e.message));
 
     app.listen(PORT, () => {
       console.log(`Server is running on http://localhost:${PORT}`);
